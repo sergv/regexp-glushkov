@@ -8,19 +8,6 @@
 {-# LANGUAGE DerivingStrategies   #-}
 {-# LANGUAGE UndecidableInstances #-}
 
--- {-# LANGUAGE DeriveFunctor        #-}
---
--- {-# LANGUAGE FlexibleContexts     #-}
--- {-# LANGUAGE FlexibleInstances    #-}
--- {-# LANGUAGE KindSignatures       #-}
--- {-# LANGUAGE LiberalTypeSynonyms  #-}
--- {-# LANGUAGE ScopedTypeVariables  #-}
--- {-# LANGUAGE StandaloneDeriving   #-}
--- {-# LANGUAGE TypeOperators        #-}
--- {-# LANGUAGE TypeSynonymInstances #-}
--- {-# LANGUAGE UnicodeSyntax        #-}
--- {-# LANGUAGE ViewPatterns         #-}
-
 module Text.Regex.Glushkov
   ( Fix(..)
   , cata
@@ -41,13 +28,14 @@ module Text.Regex.Glushkov
   , regexSize
   , reversed
 
+  , Match(..)
   , generateStrings
   , match
+  , allMatches
   , matchIter
   ) where
 
 import Data.Kind (Type)
-import Data.List (foldl')
 import Data.Monoid hiding (All)
 import GHC.Generics (Generic)
 import Prelude hiding (sum)
@@ -57,7 +45,10 @@ newtype Fix (f :: Type -> Type) = Fix { unFix :: f (Fix f) }
 
 deriving instance Eq (f (Fix f))   => Eq (Fix f)
 deriving instance Ord (f (Fix f))  => Ord (Fix f)
-deriving instance Show (f (Fix f)) => Show (Fix f)
+
+instance Show (f (Fix f)) => Show (Fix f) where
+  showsPrec n x = showParen (n > 10) $ showString "Fix " . showsPrec 11 (unFix x)
+
 
 type Alg f a = f a -> a
 
@@ -97,7 +88,7 @@ data RxF a = RxF
 type Rx = Fix RxF
 
 final' :: RxF Rx -> Bool
-final' rx = if active rx then final rx else False
+final' rx = active rx && final rx
 
 stripRx :: Rx -> Regex
 stripRx = cata alg
@@ -407,33 +398,64 @@ generateStrings limit alphabet rx
 
 ----- matching
 
-shift :: Bool -> Rx -> Char -> Rx
-shift mark rx c = para alg rx mark
-  where
-    alg :: RxF (Bool -> Rx, Rx) -> Bool -> Rx
-    alg re m = case re of
-      RxF { reg = Eps }                    -> reps
-      RxF { reg = All }                    -> rall' m
-      RxF { reg = Sym sym }                -> rsym' (m && sym == c) sym
-      RxF { reg = Or (p, _) (q, _) }       -> ror (p m) (q m)
-      RxF { reg = Seq (p, Fix p') (q, _) } -> rseq (p m) (q (final' p' || m && matchesEmpty p'))
-      RxF { reg = Rep (r, Fix r') }        -> rrep $ r $ m || final' r'
-      RxF { reg = And (p, _) (q, _) }      -> rand (p m) (q m)
+shiftInit :: Rx -> Char -> Rx
+shiftInit rx c = para (markAlg c) rx True
 
-shift' :: Bool -> Rx -> Char -> Rx
-shift' m rx c
-  | m || active (unFix rx)
-  = shift m rx c
+shift :: Rx -> Char -> Rx
+shift rx c = para (markAlg c) rx False
+
+markAlg :: Char -> RxF (Bool -> Rx, Rx) -> Bool -> Rx
+markAlg !c re m = case re of
+  RxF { reg = Eps }                    -> reps
+  RxF { reg = All }                    -> rall' m
+  RxF { reg = Sym sym }                -> rsym' (m && sym == c) sym
+  RxF { reg = Or (p, _) (q, _) }       -> ror (p m) (q m)
+  RxF { reg = Seq (p, Fix p') (q, _) } -> rseq (p m) (q (final' p' || m && matchesEmpty p'))
+  RxF { reg = Rep (r, Fix r') }        -> rrep $ r $ m || final' r'
+  RxF { reg = And (p, _) (q, _) }      -> rand (p m) (q m)
+
+shift' :: Rx -> Char -> Rx
+shift' rx c
+  | active (unFix rx)
+  = shift rx c
   | otherwise
   = rx
 
 match :: Rx -> String -> Bool
 match r [] = matchesEmpty $ unFix r
-match r xs = final' $ unFix $ matchIter r xs
+match r xs = final' r'
+  where
+    (Fix r', _, _, _) = matchIter r xs
 
-matchIter :: Rx -> String -> Rx
-matchIter r []     = r
-matchIter r (c:cs) = foldl' (shift' False) (shift' True r c) cs
+allMatches :: Rx -> [Char] -> [Match]
+allMatches r = go
+  where
+    go [] = []
+    go cs@(_ : cs')
+      -- | Debug.Trace.trace ("cs = " ++ show cs ++ ", cs' = " ++ show cs' ++ ", cs'' = " ++ show cs'' ++ ", matched = " ++ show matched) $ False = undefined
+      | matched   = m : go cs''
+      | otherwise = go cs'
+      where
+        (_, m, matched, cs'') = matchIter r cs
+
+newtype Match = Match [Char]
+  deriving stock (Eq, Ord, Show)
+
+matchIter :: Rx -> [Char] -> (Rx, Match, Bool, [Char])
+matchIter r []       = (r, Match [], matchesEmpty $ unFix r, [])
+matchIter r (c : cs) = go False [] (shiftInit r c) c cs
+  where
+    go :: Bool -> [Char] -> Rx -> Char -> [Char] -> (Rx, Match, Bool, [Char])
+    go seenFinal ms !rx'@(Fix rx) !prev []
+      | final' rx
+      = (rx', Match $ reverse $ prev : ms, True, [])
+      | otherwise
+      = (rx', Match $ reverse ms, seenFinal, [prev])
+    go seenFinal ms rx'@(Fix rx)  prev xs'@(x:xs)
+      | active rx
+      = go (seenFinal || final rx) (prev : ms) (shift' rx' x) x xs
+      | otherwise
+      = (rx', Match $ reverse ms, seenFinal, prev : xs')
 
 -- buildTrickyRegex :: Rx -> Int -> Rx
 -- buildTrickyRegex toWrap n = iter n reps reps

@@ -89,11 +89,8 @@ test-suite test
   build-depends:
     , base >= 4.14
     , tasty
-    , tasty-hunit
     , tasty-quickcheck
     , regex-glushkov
   ghc-options:
     -rtsopts
-    -- -threaded
-    -- "-with-rtsopts=-N -A32M"
     -main-is TestMain

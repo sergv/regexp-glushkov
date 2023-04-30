@@ -5,8 +5,6 @@
 -- Maintainer: serg.foo@gmail.com
 
 {-# LANGUAGE ApplicativeDo        #-}
-{-# LANGUAGE ImportQualifiedPost  #-}
-{-# LANGUAGE NamedFieldPuns       #-}
 {-# LANGUAGE RecordWildCards      #-}
 {-# LANGUAGE UndecidableInstances #-}
 
@@ -19,7 +17,6 @@ import Data.List qualified as L
 import Text.Regex.Glushkov
 
 import Test.Tasty
-import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck as QC
 
 main :: IO ()
