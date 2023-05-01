@@ -6,6 +6,7 @@
 
 {-# LANGUAGE DeriveGeneric        #-}
 {-# LANGUAGE DerivingStrategies   #-}
+{-# LANGUAGE MagicHash            #-}
 {-# LANGUAGE TypeFamilies         #-}
 {-# LANGUAGE UndecidableInstances #-}
 
@@ -38,16 +39,26 @@ module Text.Regex.Glushkov
   , matchIter
   ) where
 
+import Data.Word
+import Data.Vector.Primitive qualified as P
+-- import Data.Vector.Primitive.Mutable qualified as PM
+import Data.Vector.Generic qualified as G
+import Data.Vector.Generic.Mutable qualified as GM
+
 import Prettyprinter.Combinators
 import Prettyprinter.Generics (ppGeneric)
 
+import GHC.Exts (dataToTag#, tagToEnum#, Int(..))
 import Control.Monad
-import Control.Monad.State
 import Control.Monad.ST
-import Data.Bit
+import Control.Monad.State
 import Data.Coerce
 import Data.Kind (Type)
 import Data.Monoid hiding (All)
+import Data.Text (Text)
+import Data.Text qualified as T
+import Data.Text.Internal qualified as TI
+import Data.Text.Unsafe qualified as TU
 import Data.Vector.Unboxed qualified as U
 import Data.Vector.Unboxed.Mutable qualified as UM
 import GHC.Generics (Generic)
@@ -210,10 +221,69 @@ instance Pretty IRegex where
 instance Pretty (IRegexF IRegex) where
   pretty = ppGeneric
 
+newtype EfficientBool = EfficientBool { unEfficientBool :: Bool }
+  deriving newtype (Pretty)
+
+{-# INLINE fromBool #-}
+fromBool :: EfficientBool -> Word8
+fromBool (EfficientBool x) = fromIntegral (I# (dataToTag# x))
+
+toBool :: Word8 -> EfficientBool
+{-# INLINE toBool #-}
+toBool x = case fromIntegral x of
+  I# y -> EfficientBool (tagToEnum# y)
+
+newtype instance U.MVector s EfficientBool = MV_Bool (P.MVector s Word8)
+newtype instance U.Vector    EfficientBool = V_Bool  (P.Vector    Word8)
+
+instance U.Unbox EfficientBool
+
+instance GM.MVector UM.MVector EfficientBool where
+  {-# INLINE basicLength #-}
+  {-# INLINE basicUnsafeSlice #-}
+  {-# INLINE basicOverlaps #-}
+  {-# INLINE basicUnsafeNew #-}
+  {-# INLINE basicInitialize #-}
+  {-# INLINE basicUnsafeReplicate #-}
+  {-# INLINE basicUnsafeRead #-}
+  {-# INLINE basicUnsafeWrite #-}
+  {-# INLINE basicClear #-}
+  {-# INLINE basicSet #-}
+  {-# INLINE basicUnsafeCopy #-}
+  {-# INLINE basicUnsafeGrow #-}
+  basicLength (MV_Bool v) = GM.basicLength v
+  basicUnsafeSlice i n (MV_Bool v) = MV_Bool $ GM.basicUnsafeSlice i n v
+  basicOverlaps (MV_Bool v1) (MV_Bool v2) = GM.basicOverlaps v1 v2
+  basicUnsafeNew n = MV_Bool `fmap` GM.basicUnsafeNew n
+  basicInitialize (MV_Bool v) = GM.basicInitialize v
+  basicUnsafeReplicate n x = MV_Bool `fmap` GM.basicUnsafeReplicate n (fromBool x)
+  basicUnsafeRead (MV_Bool v) i = toBool `fmap` GM.basicUnsafeRead v i
+  basicUnsafeWrite (MV_Bool v) i x = GM.basicUnsafeWrite v i (fromBool x)
+  basicClear (MV_Bool v) = GM.basicClear v
+  basicSet (MV_Bool v) x = GM.basicSet v (fromBool x)
+  basicUnsafeCopy (MV_Bool v1) (MV_Bool v2) = GM.basicUnsafeCopy v1 v2
+  basicUnsafeMove (MV_Bool v1) (MV_Bool v2) = GM.basicUnsafeMove v1 v2
+  basicUnsafeGrow (MV_Bool v) n = MV_Bool `fmap` GM.basicUnsafeGrow v n
+
+instance G.Vector U.Vector EfficientBool where
+  {-# INLINE basicUnsafeFreeze #-}
+  {-# INLINE basicUnsafeThaw #-}
+  {-# INLINE basicLength #-}
+  {-# INLINE basicUnsafeSlice #-}
+  {-# INLINE basicUnsafeIndexM #-}
+  {-# INLINE elemseq #-}
+  basicUnsafeFreeze (MV_Bool v) = V_Bool `fmap` G.basicUnsafeFreeze v
+  basicUnsafeThaw (V_Bool v) = MV_Bool `fmap` G.basicUnsafeThaw v
+  basicLength (V_Bool v) = G.basicLength v
+  basicUnsafeSlice i n (V_Bool v) = V_Bool $ G.basicUnsafeSlice i n v
+  basicUnsafeIndexM (V_Bool v) i = toBool `fmap` G.basicUnsafeIndexM v i
+  basicUnsafeCopy (MV_Bool mv) (V_Bool v) = G.basicUnsafeCopy mv v
+  elemseq _ = seq
+
 data Context s = Context
-  { ctxActive       :: {-# UNPACK #-} !(U.MVector s Bit)
-  , ctxMatchesEmpty :: {-# UNPACK #-} !(U.MVector s Bit)
-  , ctxFinal        :: {-# UNPACK #-} !(U.MVector s Bit)
+  { ctxActive       :: {-# UNPACK #-} !(U.MVector s EfficientBool)
+  , ctxMatchesEmpty :: {-# UNPACK #-} !(U.MVector s EfficientBool)
+  , ctxFinal        :: {-# UNPACK #-} !(U.MVector s EfficientBool)
   }
 
 _ppContext :: Context s -> ST s (Doc ann)
@@ -222,48 +292,48 @@ _ppContext (Context active' matchesEmpty' final') = do
   matchesEmpty'' <- U.freeze matchesEmpty'
   final''        <- U.freeze final'
   pure $ ppDictHeader "Context"
-    [ "active"       :-> ppVectorWith (pretty . unBit) active''
-    , "matchesEmpty" :-> ppVectorWith (pretty . unBit) matchesEmpty''
-    , "final"        :-> ppVectorWith (pretty . unBit) final''
+    [ "active"       :-> ppVectorWith pretty active''
+    , "matchesEmpty" :-> ppVectorWith pretty matchesEmpty''
+    , "final"        :-> ppVectorWith pretty final''
     ]
 
 active :: Context s -> IRegexF a -> ST s Bool
 active (Context active' _ _) re =
-  (coerce :: ST s Bit -> ST s Bool) $ UM.unsafeRead active' idx
+  (coerce :: ST s EfficientBool -> ST s Bool) $ UM.unsafeRead active' idx
   where
     !idx = getIdx re
 
 setActiveFinal :: Context s -> Int -> Bool -> Bool -> ST s ()
 setActiveFinal (Context active' _ final') idx isActive isFinal = do
-  UM.unsafeWrite active' idx $ Bit isActive
-  UM.unsafeWrite final'  idx $ Bit isFinal
+  UM.unsafeWrite active' idx $ EfficientBool isActive
+  UM.unsafeWrite final'  idx $ EfficientBool isFinal
 
 matchesEmpty :: Context s -> IRegexF a -> ST s Bool
 matchesEmpty (Context _ matchesEmpty' _) =
-  (coerce :: ST s Bit -> ST s Bool) . UM.unsafeRead matchesEmpty' . getIdx
+  (coerce :: ST s EfficientBool -> ST s Bool) . UM.unsafeRead matchesEmpty' . getIdx
 
 final :: Context s -> IRegexF a -> ST s Bool
 final (Context active' _ final') re = do
   isActive <- UM.unsafeRead active' idx
-  if unBit isActive
-  then (coerce :: ST s Bit -> ST s Bool) $ UM.unsafeRead final' idx
+  if unEfficientBool isActive
+  then (coerce :: ST s EfficientBool -> ST s Bool) $ UM.unsafeRead final' idx
   else pure False
   where
     !idx = getIdx re
 
 finalOnly :: Context s -> IRegexF a -> ST s Bool
 finalOnly (Context _ _ final') re =
-  (coerce :: ST s Bit -> ST s Bool) $ UM.unsafeRead final' idx
+  (coerce :: ST s EfficientBool -> ST s Bool) $ UM.unsafeRead final' idx
   where
     !idx = getIdx re
 
 activeFinal :: Context s -> IRegexF a -> ST s (Bool, Bool)
 activeFinal (Context active' _ final') re = do
   isActive <- UM.unsafeRead active' idx
-  if unBit isActive
+  if unEfficientBool isActive
   then do
-    isFinal <- (coerce :: ST s Bit -> ST s Bool) $ UM.unsafeRead final' idx
-    pure (True, isFinal)
+    isFinal <- UM.unsafeRead final' idx
+    pure (True, unEfficientBool isFinal)
   else pure (False, False)
   where
     !idx = getIdx re
@@ -295,9 +365,9 @@ initContext r size = do
     Context <$> UM.new size <*> UM.new size <*> UM.new size
   let initialize :: Int -> Bool -> ST s ()
       initialize idx matchesEmpty' = do
-        UM.unsafeWrite ctxActive idx $ Bit False
-        UM.unsafeWrite ctxMatchesEmpty idx $ Bit matchesEmpty'
-        UM.unsafeWrite ctxFinal idx $ Bit False
+        UM.unsafeWrite ctxActive idx $ EfficientBool False
+        UM.unsafeWrite ctxMatchesEmpty idx $ EfficientBool matchesEmpty'
+        UM.unsafeWrite ctxFinal idx $ EfficientBool False
 
       alg :: IRegexF IRegex -> ST s ()
       alg = \case
@@ -627,8 +697,11 @@ mark !ctx !c = go
         qMatchesEmpty     <- matchesEmpty ctx q'
         setActiveFinal ctx idx (pActive || qActive) (pFinal && qMatchesEmpty || qFinal)
       IRep idx r@(Fix r')                          -> do
-        wasFinal <- final ctx r'
-        go (m || wasFinal) r
+        if m
+        then go True r
+        else do
+          wasFinal <- final ctx r'
+          go wasFinal r
         (isActive, isFinal) <- activeFinal ctx r'
         setActiveFinal ctx idx isActive isFinal
       IAnd idx p@(Fix p') q@(Fix q')               -> do
@@ -644,78 +717,67 @@ mark !ctx !c = go
 --   when isActive $
 --     shift ctx rx c
 
-match :: Regex -> String -> Bool
-match r xs = runST $ do
+match :: Regex -> Text -> Bool
+match r str = runST $ do
   ctx <- initContext ir size
-  case xs of
-    []  -> matchesEmpty ctx $ unFix ir
-    ys  -> do
-      (_, _, _) <- matchIter ctx ir 0 ys
-      final ctx $ unFix ir
+  if T.null str
+  then matchesEmpty ctx $ unFix ir
+  else do
+    (_, _, _) <- matchIter ctx ir 0 str
+    final ctx $ unFix ir
   where
     (ir, size) = indexRegex r
 
-allMatches :: Regex -> [Char] -> [Match]
-allMatches r input = runST $ do
+allMatches :: Regex -> Text -> [Match]
+allMatches r str = runST $ do
   !ctx <- initContext ir size
-  go ctx 0 [] input
+  go ctx 0 [] str
   where
     (ir, size) = indexRegex r
-    go :: Context s -> Int -> [Match] -> [Char] -> ST s [Match]
-    go !_  !_     acc [] = pure acc
-    go ctx offset acc cs@(_ : cs') = do
-      (m, matched, cs'') <- matchIter ctx ir offset cs
-      if matched
-      then go ctx (offset + mLength m) (m : acc) cs''
-      else go ctx (offset + 1) acc cs'
+    go :: Context s -> Int -> [Match] -> Text -> ST s [Match]
+    go !ctx !offset !acc !input = case T.uncons input of
+      Nothing          -> pure $ reverse acc
+      Just (_, input') -> do
+        (m, matched, input'') <- matchIter ctx ir offset input
+        if matched
+        then go ctx (offset + mLength m) (m : acc) input''
+        else go ctx (offset + 1) acc input'
 
 data Match = Match
   { mOffset :: !Int
   , mLength :: !Int
   } deriving stock (Eq, Ord, Show, Generic)
 
-matchIter :: forall s. Context s -> IRegex -> Int -> [Char] -> ST s (Match, Bool, [Char])
-matchIter !ctx r !offset []       = do
-  haveMatch <- matchesEmpty ctx $ unFix r
-  pure (Match offset 0, haveMatch, [])
-matchIter  ctx r@(Fix rx) offset  (c : cs) = do
-  -- context <- ppContext ctx
-  -- traceM $ renderString $ ppDictHeader "matchIter start"
-  --   [ "regex"   --> r
-  --   , "context" :-> context
-  --   ]
-  shiftInit ctx r c
-  go False 0 c cs
+matchIter :: forall s. Context s -> IRegex -> Int -> Text -> ST s (Match, Bool, Text)
+matchIter !ctx !r@(Fix rx) !offset (TI.Text arr off len)
+  | len == 0
+  = do
+    haveMatch <- matchesEmpty ctx $ unFix r
+    pure (Match offset 0, haveMatch, T.empty)
+  | otherwise = do
+    let TU.Iter c delta = TU.iterArray arr off
+    shiftInit ctx r c
+    go False 0 c off (off + delta)
   where
-    go :: Bool -> Int -> Char -> [Char] -> ST s (Match, Bool, [Char])
-    go seenFinal !len !prev = \case
-      []         -> do
-        -- context <- ppContext ctx
-        -- traceM $ renderString $ ppDictHeader "matchIter end"
-        --   [ "len"     --> len
-        --   , "prev"    --> prev
-        --   , "context" :-> context
-        --   ]
+    !end = off + len
 
+    go :: Bool -> Int -> Char -> Int -> Int -> ST s (Match, Bool, Text)
+    go seenFinal !matchLen !_prev !i !j
+      | j >= end
+      = do
         isFinal <- final ctx rx
-        if isFinal
-        then
-          pure (Match offset $ len + 1, True, [])
-        else
-          pure (Match offset len, seenFinal, [prev])
-      xs'@(x:xs) -> do
-        -- context <- ppContext ctx
-        -- traceM $ renderString $ ppDictHeader "matchIter loop"
-        --   [ "len"     --> len
-        --   , "prev"    --> prev
-        --   , "context" :-> context
-        --   ]
-
+        pure $
+          if isFinal
+          then (Match offset $ matchLen + 1, True, T.empty)
+          else (Match offset matchLen, seenFinal, TI.Text arr i $! len - off + i)
+      | otherwise
+      = do
         isActive <- active ctx rx
         if isActive
         then do
+          let TU.Iter c delta = TU.iterArray arr j
           isFinal <- finalOnly ctx rx
-          shift ctx r x
-          go (seenFinal || isFinal) (len + 1) x xs
+          shift ctx r c
+          go (seenFinal || isFinal) (matchLen + 1) c j (j + delta)
         else
-          pure (Match offset len, seenFinal, prev : xs')
+          pure (Match offset matchLen, seenFinal, TI.Text arr i $! len - off + i)

@@ -13,6 +13,7 @@
 module TestMain (main) where
 
 import Data.List qualified as L
+import Data.Text qualified as T
 
 import Text.Regex.Glushkov
 
@@ -30,11 +31,11 @@ properties = testGroup "Properties"
   [ QC.testProperty "matches" $
       \(RegexTestCase r strs) ->
         label ("size = " ++ show (L.length strs)) $
-        all (match r) strs
+        all (match r . T.pack) strs
   , QC.testProperty "reverse matches" $
       \(RegexTestCase r strs) ->
         label ("size = " ++ show (L.length strs)) $
-        all (match (reversed r) . reverse) strs
+        all (match (reversed r) . T.pack . reverse) strs
   ]
 
 unitTests :: TestTree

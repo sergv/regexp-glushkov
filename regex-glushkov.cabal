@@ -73,12 +73,12 @@ library
   hs-source-dirs:
     src
   build-depends:
-    , bitvec
+    -- , bitvec
     , base >= 4.16
     , mtl
     , prettyprinter-combinators
     , vector
-    -- , text ^>= 2.0
+    , text >= 2.0
 
 test-suite test
   import: ghc-options
@@ -90,6 +90,7 @@ test-suite test
     , base >= 4.14
     , tasty
     , tasty-quickcheck
+    , text
     , regex-glushkov
   ghc-options:
     -rtsopts

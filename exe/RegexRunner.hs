@@ -50,7 +50,7 @@ main = do
   contents <- T.decodeUtf8 <$> readFile' cfgInputFile
 
   let regex   = fromString cfgRegex
-      matches = allMatches regex (T.unpack contents)
+      matches = allMatches regex contents
 
   putStrLn $ "Regex = " ++ show regex
   putStrLn $ "Input length = " ++ show (T.length contents)

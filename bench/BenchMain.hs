@@ -52,6 +52,14 @@ reAllByteStringMatches
   :: TDFA.Regex -> C8.ByteString -> AllMatches [] (MatchOffset, MatchLength)
 reAllByteStringMatches = TDFA.match
 
+reAllTextMatches
+  :: TDFA.Regex -> Text -> AllMatches [] (MatchOffset, MatchLength)
+reAllTextMatches = TDFA.match
+
+reAllStringMatches
+  :: TDFA.Regex -> [Char] -> AllMatches [] (MatchOffset, MatchLength)
+reAllStringMatches = TDFA.match
+
 -- extractMatches :: C8.ByteString -> AllMatches [] (MatchOffset, MatchLength) -> [C8.ByteString]
 -- extractMatches str ms
 --   = map (\(offset, len) -> Unsafe.unsafeTake len $ Unsafe.unsafeDrop offset str)
@@ -73,14 +81,18 @@ main = do
       reTDFA     = compileRe re
       reGlushkov = Glushkov.fromString $ T.unpack re
 
+  evaluate $ rnf strC8
+  evaluate $ rnf strText
   evaluate $ rnf strList
 
   let tdfaLen     = length $ getAllMatches $ reAllByteStringMatches reTDFA strC8
-      glushkovLen = length $ Glushkov.allMatches reGlushkov strList
+      glushkovLen = length $ Glushkov.allMatches reGlushkov strText
 
   putStrLn $ "tdfaLen = " ++ show tdfaLen ++ ", glushkovLen = " ++ show glushkovLen
 
   defaultMain
-    [                   bench "tdfa"     $ nf (reAllByteStringMatches reTDFA) strC8
-    , bcompare "tdfa" $ bench "glushkov" $ nf (Glushkov.allMatches reGlushkov) strList
+    [                      bench "tdfa bs"     $ nf (reAllByteStringMatches reTDFA) strC8
+    ,                      bench "tdfa text"   $ nf (reAllTextMatches reTDFA) strText
+    ,                      bench "tdfa string" $ nf (reAllStringMatches reTDFA) strList
+    , bcompare "tdfa bs" $ bench "glushkov"    $ nf (Glushkov.allMatches reGlushkov) strText
     ]
