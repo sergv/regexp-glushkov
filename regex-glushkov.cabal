@@ -73,7 +73,11 @@ library
   hs-source-dirs:
     src
   build-depends:
+    , bitvec
     , base >= 4.16
+    , mtl
+    , prettyprinter-combinators
+    , vector
     -- , text ^>= 2.0
 
 test-suite test

@@ -67,7 +67,7 @@ instance Arbitrary (f (Fix f)) => Arbitrary (Fix f) where
   arbitrary = Fix <$> arbitrary
   shrink = genericShrink
 
-instance Arbitrary (RxF Rx) where
+instance Arbitrary (RegexF Regex) where
   arbitrary = do
     Fix x <- frequency
       [ (1, pure reps)
@@ -84,25 +84,16 @@ instance Arbitrary (RxF Rx) where
 
   shrink = genericShrink
 
-instance Arbitrary a => Arbitrary (RegexF a) where
-  arbitrary = error "Not defined, only for shrinking"
-  shrink = genericShrink
-
-
 data RegexTestCase a = RegexTestCase a [String]
   deriving (Eq, Ord, Show)
-
-instance {-# OVERLAPPING #-} Show (RegexTestCase Rx) where
-  show (RegexTestCase r strs) =
-    show (RegexTestCase (cata (Fix . reg) r) strs :: RegexTestCase Regex)
 
 maxLen :: Int
 maxLen = 6
 
-generateStrs :: Rx -> [String]
+generateStrs :: Regex -> [String]
 generateStrs r = generateStrings maxLen alphabet r
 
-instance Arbitrary (RegexTestCase Rx) where
+instance Arbitrary (RegexTestCase Regex) where
   arbitrary = do
     r <- arbitrary
     pure $ RegexTestCase r $ generateStrs r
