@@ -77,8 +77,9 @@ library
     , base >= 4.16
     , mtl
     , prettyprinter-combinators
-    , vector
     , text >= 2.0
+    , utf8-string
+    , vector
 
 test-suite test
   import: ghc-options
@@ -88,10 +89,10 @@ test-suite test
     test/TestMain.hs
   build-depends:
     , base >= 4.14
+    , regex-glushkov
     , tasty
     , tasty-quickcheck
     , text
-    , regex-glushkov
   ghc-options:
     -rtsopts
     -main-is TestMain

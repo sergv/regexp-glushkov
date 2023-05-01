@@ -39,16 +39,19 @@ module Text.Regex.Glushkov
   , matchIter
   ) where
 
-import Data.Word
-import Data.Vector.Primitive qualified as P
 -- import Data.Vector.Primitive.Mutable qualified as PM
+import Codec.Binary.UTF8.String
+import Data.Char
+import Data.Foldable
+import Data.List.NonEmpty (NonEmpty(..))
 import Data.Vector.Generic qualified as G
 import Data.Vector.Generic.Mutable qualified as GM
+import Data.Vector.Primitive qualified as P
+import Data.Word
 
 import Prettyprinter.Combinators
 import Prettyprinter.Generics (ppGeneric)
 
-import GHC.Exts (dataToTag#, tagToEnum#, Int(..))
 import Control.Monad
 import Control.Monad.ST
 import Control.Monad.State
@@ -57,10 +60,11 @@ import Data.Kind (Type)
 import Data.Monoid hiding (All)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Array qualified as TA
 import Data.Text.Internal qualified as TI
-import Data.Text.Unsafe qualified as TU
 import Data.Vector.Unboxed qualified as U
 import Data.Vector.Unboxed.Mutable qualified as UM
+import GHC.Exts (dataToTag#, tagToEnum#, Int(..))
 import GHC.Generics (Generic)
 import Prelude hiding (sum)
 import Unsafe.Coerce
@@ -117,7 +121,7 @@ paraM_ alg = go
 data RegexF a
   = Eps
   | All -- Symbol that matches anything, i.e. ".". NB special kind of symbol bearing it's own mark
-  | Sym !Char
+  | Sym !Word8
   | Or  a a
   | Seq a a
   | Rep a
@@ -163,7 +167,7 @@ type Regex = Fix RegexF
 data IRegexF a
   = IEps !Int
   | IAll !Int -- Symbol that matches anything, i.e. ".". NB special kind of symbol bearing it's own mark
-  | ISym !Int !Char
+  | ISym !Int !Word8
   | IOr  !Int a a
   | ISeq !Int a a
   | IRep !Int a
@@ -447,7 +451,7 @@ showReExpr = para alg
     alg = \case
       Eps{}   -> "ε"
       All{}   -> "."
-      Sym c   -> [c]
+      Sym c   -> [chr $ fromIntegral c]
       Or p q  ->
         let parensPred = \case
               Eps   -> True
@@ -501,7 +505,10 @@ rall :: Regex
 rall = Fix All
 
 rsym :: Char -> Regex
-rsym c = Fix $ Sym c
+rsym c =
+  case map (Fix . Sym) $ encodeChar c of
+    []     -> reps
+    x : xs -> foldr1 rseq (x :| xs)
 
 ror :: Regex -> Regex -> Regex
 ror = (Fix .) . Or
@@ -633,7 +640,7 @@ generateStrings limit alphabet
         alg = \case
           Eps     -> [LengthOrdered ""]
           All     -> map (LengthOrdered . (:[])) alphabet
-          Sym c   -> [LengthOrdered [c]]
+          Sym c   -> [LengthOrdered [chr $ fromIntegral c]]
           Or  p q -> union limit p q
           Seq p q -> xprod limit (<>) p q
           Rep r   -> closure limit (<>) mempty r
@@ -658,15 +665,16 @@ generateStrings limit alphabet
 --   RxF { reg = Rep (r, Fix r') }        -> rrep $ r $ m || final' r'
 --   RxF { reg = And (p, _) (q, _) }      -> rand (p m) (q m)
 
-shiftInit :: Context s -> IRegex -> Char -> ST s ()
+shiftInit :: Context s -> IRegex -> Word8 -> ST s ()
 shiftInit !ctx rx !c = mark ctx c True rx
 
-shift :: Context s -> IRegex -> Char -> ST s ()
+shift :: Context s -> IRegex -> Word8 -> ST s ()
 shift !ctx rx !c = mark ctx c False rx
 
 mark
-  :: forall s. Context s
-  -> Char
+  :: forall s.
+     Context s
+  -> Word8
   -> Bool
   -> IRegex
   -> ST s ()
@@ -755,13 +763,13 @@ matchIter !ctx !r@(Fix rx) !offset (TI.Text arr off len)
     haveMatch <- matchesEmpty ctx $ unFix r
     pure (Match offset 0, haveMatch, T.empty)
   | otherwise = do
-    let TU.Iter c delta = TU.iterArray arr off
+    let !c = TA.unsafeIndex arr off
     shiftInit ctx r c
-    go False 0 c off (off + delta)
+    go False 0 c off (off + 1)
   where
     !end = off + len
 
-    go :: Bool -> Int -> Char -> Int -> Int -> ST s (Match, Bool, Text)
+    go :: Bool -> Int -> Word8 -> Int -> Int -> ST s (Match, Bool, Text)
     go seenFinal !matchLen !_prev !i !j
       | j >= end
       = do
@@ -775,9 +783,9 @@ matchIter !ctx !r@(Fix rx) !offset (TI.Text arr off len)
         isActive <- active ctx rx
         if isActive
         then do
-          let TU.Iter c delta = TU.iterArray arr j
+          let !c = TA.unsafeIndex arr j
           isFinal <- finalOnly ctx rx
           shift ctx r c
-          go (seenFinal || isFinal) (matchLen + 1) c j (j + delta)
+          go (seenFinal || isFinal) (matchLen + 1) c j (j + 1)
         else
           pure (Match offset matchLen, seenFinal, TI.Text arr i $! len - off + i)
