@@ -291,7 +291,7 @@ indexRegex
 
 initContext :: forall s. IRegex -> Int -> ST s (Context s)
 initContext r size = do
-  ctx@Context{ctxActive, ctxMatchesEmpty, ctxFinal} <-
+  !ctx@Context{ctxActive, ctxMatchesEmpty, ctxFinal} <-
     Context <$> UM.new size <*> UM.new size <*> UM.new size
   let initialize :: Int -> Bool -> ST s ()
       initialize idx matchesEmpty' = do
@@ -589,51 +589,54 @@ generateStrings limit alphabet
 --   RxF { reg = And (p, _) (q, _) }      -> rand (p m) (q m)
 
 shiftInit :: Context s -> IRegex -> Char -> ST s ()
-shiftInit ctx rx !c = para (markAlg ctx c) rx True
+shiftInit !ctx rx !c = mark ctx c True rx
 
 shift :: Context s -> IRegex -> Char -> ST s ()
-shift ctx rx !c = para (markAlg ctx c) rx False
+shift !ctx rx !c = mark ctx c False rx
 
-{-# INLINE markAlg #-}
-markAlg
-  :: Context s
+mark
+  :: forall s. Context s
   -> Char
-  -> IRegexF (Bool -> ST s (), IRegex)
-  -> (Bool -> ST s ())
-markAlg ctx !c = \case
-  IEps _                                        -> \_ -> pure ()
-  IAll idx                                      -> \m ->
-    setActiveFinal ctx idx m m
-  ISym idx sym                                  -> \m -> do
-    let !m' = m && sym == c
-    setActiveFinal ctx idx m' m'
-  IOr  idx (p, Fix p') (q, Fix q')              -> \m -> do
-    p m
-    q m
-    (pActive, pFinal) <- activeFinal ctx p'
-    (qActive, qFinal) <- activeFinal ctx q'
-    setActiveFinal ctx idx (pActive || qActive) (pFinal || qFinal)
-  ISeq idx (p, Fix p') (q, Fix q')              -> \m -> do
-    pMatchesEmpty <- matchesEmpty ctx p'
-    pFinalBefore  <- final ctx p'
-    let !m' = pFinalBefore || m && pMatchesEmpty
-    p m
-    q m'
-    (pActive, pFinal) <- activeFinal ctx p'
-    (qActive, qFinal) <- activeFinal ctx q'
-    qMatchesEmpty     <- matchesEmpty ctx q'
-    setActiveFinal ctx idx (pActive || qActive) (pFinal && qMatchesEmpty || qFinal)
-  IRep idx (r, Fix r')                          -> \m -> do
-    wasFinal <- final ctx r'
-    r $ m || wasFinal
-    (isActive, isFinal) <- activeFinal ctx r'
-    setActiveFinal ctx idx isActive isFinal
-  IAnd idx (p, Fix p') (q, Fix q')              -> \m -> do
-    p m
-    q m
-    (pActive, pFinal) <- activeFinal ctx p'
-    (qActive, qFinal) <- activeFinal ctx q'
-    setActiveFinal ctx idx (pActive && qActive) (pFinal && qFinal)
+  -> Bool
+  -> IRegex
+  -> ST s ()
+mark !ctx !c = go
+  where
+    go :: Bool -> IRegex -> ST s ()
+    go m (Fix rx) = case rx of
+      IEps _                                       -> pure ()
+      IAll idx                                     ->
+        setActiveFinal ctx idx m m
+      ISym idx sym                                 -> do
+        let !m' = m && sym == c
+        setActiveFinal ctx idx m' m'
+      IOr  idx p@(Fix p') q@(Fix q')               -> do
+        go m p
+        go m q
+        (pActive, pFinal) <- activeFinal ctx p'
+        (qActive, qFinal) <- activeFinal ctx q'
+        setActiveFinal ctx idx (pActive || qActive) (pFinal || qFinal)
+      ISeq idx p@(Fix p') q@(Fix q')               -> do
+        pMatchesEmpty <- matchesEmpty ctx p'
+        pFinalBefore  <- final ctx p'
+        let !m' = pFinalBefore || m && pMatchesEmpty
+        go m p
+        go m' q
+        (pActive, pFinal) <- activeFinal ctx p'
+        (qActive, qFinal) <- activeFinal ctx q'
+        qMatchesEmpty     <- matchesEmpty ctx q'
+        setActiveFinal ctx idx (pActive || qActive) (pFinal && qMatchesEmpty || qFinal)
+      IRep idx r@(Fix r')                          -> do
+        wasFinal <- final ctx r'
+        go (m || wasFinal) r
+        (isActive, isFinal) <- activeFinal ctx r'
+        setActiveFinal ctx idx isActive isFinal
+      IAnd idx p@(Fix p') q@(Fix q')               -> do
+        go m p
+        go m q
+        (pActive, pFinal) <- activeFinal ctx p'
+        (qActive, qFinal) <- activeFinal ctx q'
+        setActiveFinal ctx idx (pActive && qActive) (pFinal && qFinal)
 
 -- shift' :: Context s -> IRegex -> Char -> ST s ()
 -- shift' ctx rx c = do
@@ -654,7 +657,7 @@ match r xs = runST $ do
 
 allMatches :: Regex -> [Char] -> [Match]
 allMatches r input = runST $ do
-  ctx <- initContext ir size
+  !ctx <- initContext ir size
   go ctx 0 [] input
   where
     (ir, size) = indexRegex r
@@ -672,10 +675,10 @@ data Match = Match
   } deriving stock (Eq, Ord, Show, Generic)
 
 matchIter :: forall s. Context s -> IRegex -> Int -> [Char] -> ST s (Match, Bool, [Char])
-matchIter ctx r !offset []       = do
+matchIter !ctx r !offset []       = do
   haveMatch <- matchesEmpty ctx $ unFix r
   pure (Match offset 0, haveMatch, [])
-matchIter ctx r@(Fix rx) offset  (c : cs) = do
+matchIter  ctx r@(Fix rx) offset  (c : cs) = do
   -- context <- ppContext ctx
   -- traceM $ renderString $ ppDictHeader "matchIter start"
   --   [ "regex"   --> r

@@ -49,8 +49,11 @@ main = do
 
   contents <- T.decodeUtf8 <$> readFile' cfgInputFile
 
-  let matches = allMatches (fromString cfgRegex) (T.unpack contents)
+  let regex   = fromString cfgRegex
+      matches = allMatches regex (T.unpack contents)
 
+  putStrLn $ "Regex = " ++ show regex
+  putStrLn $ "Input length = " ++ show (T.length contents)
   traverse_ print matches
 
   pure ()
