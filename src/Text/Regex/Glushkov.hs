@@ -8,6 +8,8 @@
 {-# LANGUAGE DerivingStrategies   #-}
 {-# LANGUAGE UndecidableInstances #-}
 
+{-# OPTIONS_GHC -ddump-simpl -dsuppress-uniques -dsuppress-idinfo -dsuppress-module-prefixes -dsuppress-type-applications -dsuppress-coercions -dppr-cols200 -dsuppress-type-signatures -ddump-to-file #-}
+
 module Text.Regex.Glushkov
   ( Fix(..)
   , cata
@@ -39,6 +41,7 @@ import Data.Kind (Type)
 import Data.Monoid hiding (All)
 import GHC.Generics (Generic)
 import Prelude hiding (sum)
+import Unsafe.Coerce
 
 newtype Fix (f :: Type -> Type) = Fix { unFix :: f (Fix f) }
   deriving stock (Generic)
@@ -57,14 +60,22 @@ cata alg = go
   where
     go = alg . fmap go . unFix
 
+zygo :: Functor f => (f (a, b, c) -> a) -> (f b -> b) -> (f c -> c) -> Fix f -> a
+zygo f g h = (\(a, _, _) -> a) . go
+  where
+    go
+      = (\x -> (f x, g ((\(_, b, _) -> b) <$> x), h ((\(_, _, c) -> c) <$> x)))
+      . fmap go
+      . unFix
+
 -- Want "f (Fix f, a) -> a" instead of general
 -- Algebra "Alg f (Fix f, a) = f (Fix f, a) -> (Fix f, a)". There's
 -- no point in returning Fix f from algebra since it's going to be ignored
 para :: forall f a. Functor f => (f (a, Fix f) -> a) -> Fix f -> a
 para alg = go
   where
-    go = alg . fmap copyArg . unFix
-    copyArg term = (para alg term, term)
+    go = alg . fmap (\term -> (go term, term)) . unFix
+    -- copyArg term = (go term, term)
 
 data RegexF a
   = Eps
@@ -74,7 +85,18 @@ data RegexF a
   | Seq a a
   | Rep a
   | And a a
-  deriving stock (Functor, Show, Generic)
+  deriving stock (Show, Generic)
+
+instance Functor RegexF where
+  {-# INLINE fmap #-}
+  fmap f = \case
+    Eps      -> Eps
+    All      -> All
+    re@Sym{} -> unsafeCoerce re
+    Or  a b  -> Or (f a) (f b)
+    Seq a b  -> Seq (f a) (f b)
+    Rep a    -> Rep (f a)
+    And a b  -> And (f a) (f b)
 
 type Regex = Fix RegexF
 
@@ -83,11 +105,15 @@ data RxF a = RxF
   , matchesEmpty :: Bool
   , final        :: Bool
   , reg          :: RegexF a
-  } deriving stock (Functor, Show, Generic)
+  } deriving stock (Show, Generic)
+
+instance Functor RxF where
+  {-# INLINE fmap #-}
+  fmap f (RxF a b c d) = RxF a b c (fmap f d)
 
 type Rx = Fix RxF
 
-final' :: RxF Rx -> Bool
+final' :: RxF a -> Bool
 final' rx = active rx && final rx
 
 stripRx :: Rx -> Regex
@@ -199,6 +225,7 @@ instance {-# OVERLAPS #-} Show Regex where
 
 ----- construction
 
+-- {-# INLINE reps #-}
 reps :: Rx
 reps = Fix $ RxF
   { active       = False
@@ -208,13 +235,9 @@ reps = Fix $ RxF
   }
 
 rall :: Rx
-rall = Fix $ RxF
-  { active       = False
-  , matchesEmpty = False
-  , final        = False
-  , reg          = All
-  }
+rall = rall' False
 
+-- {-# INLINE rall' #-}
 rall' :: Bool -> Rx
 rall' fin = Fix $ RxF
   { active       = fin
@@ -224,13 +247,9 @@ rall' fin = Fix $ RxF
   }
 
 rsym :: Char -> Rx
-rsym c = Fix $ RxF
-  { active       = False
-  , matchesEmpty = False
-  , final        = False
-  , reg          = Sym c
-  }
+rsym = rsym' False
 
+-- {-# INLINE rsym' #-}
 rsym' :: Bool -> Char -> Rx
 rsym' fin c = Fix $ RxF
   { active       = fin
@@ -239,6 +258,7 @@ rsym' fin c = Fix $ RxF
   , reg          = Sym c
   }
 
+-- {-# INLINE ror #-}
 ror :: Rx -> Rx -> Rx
 ror (Fix p) (Fix q) = Fix $ RxF
   { active       = active p || active q
@@ -247,6 +267,7 @@ ror (Fix p) (Fix q) = Fix $ RxF
   , reg          = Or (Fix p) (Fix q)
   }
 
+-- {-# INLINE rseq #-}
 rseq :: Rx -> Rx -> Rx
 rseq (Fix p) (Fix q) = Fix $ RxF
   { active       = active p || active q
@@ -255,6 +276,7 @@ rseq (Fix p) (Fix q) = Fix $ RxF
   , reg          = Seq (Fix p) (Fix q)
   }
 
+-- {-# INLINE rrep #-}
 rrep :: Rx -> Rx
 rrep (Fix r) = Fix $ RxF
   { active       = active r
@@ -263,6 +285,7 @@ rrep (Fix r) = Fix $ RxF
   , reg          = Rep (Fix r)
   }
 
+-- {-# INLINE rand #-}
 rand :: Rx -> Rx -> Rx
 rand (Fix p) (Fix q) = Fix $ RxF
   { active       = active p && active q
@@ -398,21 +421,39 @@ generateStrings limit alphabet rx
 
 ----- matching
 
+-- shiftInit :: Rx -> Char -> Rx
+-- shiftInit rx !c = para (markAlg c) rx True
+--
+-- shift :: Rx -> Char -> Rx
+-- shift rx !c = para (markAlg c) rx False
+--
+-- {-# INLINE markAlg #-}
+-- markAlg :: Char -> RxF (Bool -> Rx, Rx) -> Bool -> Rx
+-- markAlg !c = \re m -> case re of
+--   RxF { reg = Eps }                    -> reps
+--   RxF { reg = All }                    -> rall' m
+--   RxF { reg = Sym sym }                -> rsym' (m && sym == c) sym
+--   RxF { reg = Or (p, _) (q, _) }       -> ror (p m) (q m)
+--   RxF { reg = Seq (p, Fix p') (q, _) } -> rseq (p m) (q (final' p' || m && matchesEmpty p'))
+--   RxF { reg = Rep (r, Fix r') }        -> rrep $ r $ m || final' r'
+--   RxF { reg = And (p, _) (q, _) }      -> rand (p m) (q m)
+
 shiftInit :: Rx -> Char -> Rx
-shiftInit rx c = para (markAlg c) rx True
+shiftInit rx !c = zygo (markAlg c) final' matchesEmpty rx True
 
 shift :: Rx -> Char -> Rx
-shift rx c = para (markAlg c) rx False
+shift rx !c = zygo (markAlg c) final' matchesEmpty rx False
 
-markAlg :: Char -> RxF (Bool -> Rx, Rx) -> Bool -> Rx
-markAlg !c re m = case re of
-  RxF { reg = Eps }                    -> reps
-  RxF { reg = All }                    -> rall' m
-  RxF { reg = Sym sym }                -> rsym' (m && sym == c) sym
-  RxF { reg = Or (p, _) (q, _) }       -> ror (p m) (q m)
-  RxF { reg = Seq (p, Fix p') (q, _) } -> rseq (p m) (q (final' p' || m && matchesEmpty p'))
-  RxF { reg = Rep (r, Fix r') }        -> rrep $ r $ m || final' r'
-  RxF { reg = And (p, _) (q, _) }      -> rand (p m) (q m)
+{-# INLINE markAlg #-}
+markAlg :: Char -> RxF (Bool -> Rx, Bool, Bool) -> Bool -> Rx
+markAlg !c = \re m -> case re of
+  RxF { reg = Eps }                                      -> reps
+  RxF { reg = All }                                      -> rall' m
+  RxF { reg = Sym sym }                                  -> rsym' (m && sym == c) sym
+  RxF { reg = Or (p, _, _) (q, _, _) }                   -> ror (p m) (q m)
+  RxF { reg = Seq (p, finalP, matchesEmptyP) (q, _, _) } -> rseq (p m) (q (finalP || m && matchesEmptyP))
+  RxF { reg = Rep (r, finalR, _) }                       -> rrep $ r $ m || finalR
+  RxF { reg = And (p, _, _) (q, _, _) }                  -> rand (p m) (q m)
 
 shift' :: Rx -> Char -> Rx
 shift' rx c
@@ -425,40 +466,35 @@ match :: Rx -> String -> Bool
 match r [] = matchesEmpty $ unFix r
 match r xs = final' r'
   where
-    (Fix r', _, _, _) = matchIter r xs
+    (Fix r', _, _, _) = matchIter r 0 xs
 
 allMatches :: Rx -> [Char] -> [Match]
-allMatches r = go
+allMatches r = go 0
   where
-    go [] = []
-    go cs@(_ : cs')
-      -- | Debug.Trace.trace ("cs = " ++ show cs ++ ", cs' = " ++ show cs' ++ ", cs'' = " ++ show cs'' ++ ", matched = " ++ show matched) $ False = undefined
-      | matched   = m : go cs''
-      | otherwise = go cs'
+    go !_     [] = []
+    go offset cs@(_ : cs')
+      | matched   = m : go (offset + mLength m) cs''
+      | otherwise = go (offset + 1) cs'
       where
-        (_, m, matched, cs'') = matchIter r cs
+        (_, m, matched, cs'') = matchIter r offset cs
 
-newtype Match = Match [Char]
-  deriving stock (Eq, Ord, Show)
+data Match = Match
+  { mOffset :: !Int
+  , mLength :: !Int
+  } deriving stock (Eq, Ord, Show, Generic)
 
-matchIter :: Rx -> [Char] -> (Rx, Match, Bool, [Char])
-matchIter r []       = (r, Match [], matchesEmpty $ unFix r, [])
-matchIter r (c : cs) = go False [] (shiftInit r c) c cs
+matchIter :: Rx -> Int -> [Char] -> (Rx, Match, Bool, [Char])
+matchIter r !offset []       = (r, Match offset 0, matchesEmpty $ unFix r, [])
+matchIter r offset  (c : cs) = go False 0 (shiftInit r c) c cs
   where
-    go :: Bool -> [Char] -> Rx -> Char -> [Char] -> (Rx, Match, Bool, [Char])
-    go seenFinal ms !rx'@(Fix rx) !prev []
+    go :: Bool -> Int -> Rx -> Char -> [Char] -> (Rx, Match, Bool, [Char])
+    go seenFinal !len !rx'@(Fix rx) !prev []
       | final' rx
-      = (rx', Match $ reverse $ prev : ms, True, [])
+      = (rx', Match offset $ len + 1, True, [])
       | otherwise
-      = (rx', Match $ reverse ms, seenFinal, [prev])
-    go seenFinal ms rx'@(Fix rx)  prev xs'@(x:xs)
+      = (rx', Match offset len, seenFinal, [prev])
+    go seenFinal  len rx'@(Fix rx)  prev xs'@(x:xs)
       | active rx
-      = go (seenFinal || final rx) (prev : ms) (shift' rx' x) x xs
+      = go (seenFinal || final rx) (len + 1) (shift' rx' x) x xs
       | otherwise
-      = (rx', Match $ reverse ms, seenFinal, prev : xs')
-
--- buildTrickyRegex :: Rx -> Int -> Rx
--- buildTrickyRegex toWrap n = iter n reps reps
---   where
---     iter 0 opt solid = rseq opt (rseq solid opt)
---     iter k opt solid = iter (k - 1) (rseq (ror toWrap reps) opt) (rseq toWrap solid)
+      = (rx', Match offset len, seenFinal, prev : xs')

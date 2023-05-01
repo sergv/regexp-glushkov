@@ -1,0 +1,5 @@
+packages:
+  regex-glushkov.cabal
+
+tests: True
+benchmarks: True
